@@ -2,9 +2,11 @@
 
 先核对 live Agent、真实 thread ID、状态和可续接性。保存的 `sessionId` 只是引用，不能证明会话仍存在。原会话不可用时创建新的原生一层执行者，保留旧引用和新 ID，更新 worker 的会话记录。
 
-换模前读取最新 `worker_get` 和 `factory_models`。主动改变 `worker.model` 会产生新任务版本并要求确认；`assignedModel` 只记录实际 spawn 成功后的模型引用，不产生任务版本。指定模型与实际模型分开报告。
+换模前读取最新 `worker_get` 和 `factory_models`。主动改变 `worker.model` 会产生新任务版本并要求确认；`assignedModel` 只保留历史记录且未核实，不产生任务版本。任务指定、启动请求和宿主报告分开报告，不把 `record host_report` 当成已证明实际路由。
 
-模型设置成功刷新时跟随 Codex 当前可见目录，目录中已不存在的项从后续候选名单移除；历史 worker 的 `model` / `assignedModel` 仍保留原值用于追溯。已有指定模型后来被禁用或从目录消失时，不静默改写历史引用；继续执行前必须由用户或明确策略改选。权限拒绝、用户取消和任务自身报错不自动换模。全部候选不可用时保留 blocked 状态和报告。
+重派前先 `factory_task action=prepare`，使用返回的完整参数包。schema 错误只重试同一包并记录 `phase=schema_error`；权限拒绝、用户取消和任务错误不换模重发。响应不明确时先核对真实 thread，不盲目新建。换 thread/session 后旧派发回执和旧模型归因失效，需要重新 prepare。
+
+模型设置成功刷新时跟随 Codex 当前可见目录，目录中已不存在的项从后续候选名单移除；历史 worker 的 `model` / `assignedModel` 仍保留原值用于追溯，界面标未核实。已有指定模型后来被禁用或从目录消失时，不静默改写历史引用；继续执行前必须由用户或明确策略改选。权限拒绝、用户取消和任务自身报错不自动换模。全部候选不可用时保留 blocked 状态和报告。
 
 重派前检查已有改动、消息游标和证据，避免重复工作。旧证据不能用于新任务版本。
 

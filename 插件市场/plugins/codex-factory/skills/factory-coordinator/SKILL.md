@@ -13,6 +13,8 @@ description: 仅在软件工厂长任务已由用户按需开启协调助手时�
 
 需求、架构或验收变化，扩大文件/费用范围，不可逆操作，权限或安全阻塞，超过重试上限，更换未授权模型，以及创建新线程或额外代理，立即请示总指挥。
 
+请求原执行者重试时，使用其 `factory_task action=prepare` 返回的同一参数包；schema 错误只记录并重试同一包，不删 model/effort。权限拒绝、用户取消和任务错误不换模重发。任务指定、启动请求和宿主报告分开；`assignedModel` 只作历史且未核实，换 session 后旧归因失效。
+
 增量读取与等待的通用规则见 `../../references/collaboration.md`。使用宿主原生 `read_thread` / `wait_threads`（`afterCursor` 与有界等待）或 `factory_message read`；每轮写 `factory_coordinator op=heartbeat` 和游标，完成、失败或必要决定才上报。
 
 没有实质变化时保留会话等待，超时不失败、不催问；达到约定无进展阈值才检查一次。阶段完成、用户暂停或异常恢复/换模时停止等待，再按需重开，不持续激活空转。

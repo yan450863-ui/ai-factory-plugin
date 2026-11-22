@@ -51,7 +51,7 @@ assert.doesNotMatch(html, /min-width:700px/, '工作对话表不能强制横向�
 assert.match(html, /@media\(max-width:700px\)/);
 assert.match(html, /@media\(max-width:640px\)/);
 assert.match(html, /@media\(max-width:420px\)/);
-assert.match(script, /const APP_VERSION = '0\.4\.2'/);
+assert.match(script, /const APP_VERSION = '0\.4\.5'/);
 assert.match(html, /id="modeFactory"[^>]*>软件工厂<\/button>/);
 assert.match(html, /id="modeTeam"[^>]*>团队<\/button>/);
 assert.match(html, /<section id="teamView"/);
@@ -66,6 +66,9 @@ assert.match(script, /是否仍在运行：未核实/, '面板应区分会话记
 assert.match(script, /停止对应原生任务后再关闭记录/, '关闭请求必须要求先停止原生任务');
 assert.match(script, /worker\?\.model|worker\.worker\?\.model/, '工作对话必须读取 model');
 assert.match(script, /assignedModel/, '工作对话必须区分实际 assignedModel');
+assert.match(script, /历史 .*未核实/, '历史 assignedModel 必须标未核实');
+assert.match(script, /启动请求/, '派发回执必须区分启动请求');
+assert.match(script, /宿主报告/, '派发回执必须区分宿主报告');
 assert.match(script, /请按需读取最新 factory 模式 settings、project_get、worker_get/, '派发请求必须按需读取');
 assert.match(modelPanel, /factory_models_ui/);
 assert.match(modelPanel, /factory_models_save/);
@@ -150,22 +153,22 @@ const { createModelSettings } = await import(
 
 const isolatedCatalog = [
   {
-    slug: 'fixture/balanced',
-    display_name: 'Balanced Fixture',
-    provider: 'fixture',
+    slug: 'auto/codex-auto-review',
+    display_name: 'Codex Auto Review',
+    provider: 'auto',
     supported_reasoning_levels: [],
   },
   {
-    slug: 'fixture/frontier',
-    display_name: 'Frontier Fixture',
-    provider: 'fixture',
+    slug: 'api/gpt-6.1-sol',
+    display_name: 'GPT-6.1 Sol',
+    provider: 'api',
     supported_reasoning_levels: ['low', 'medium', 'high'],
     default_reasoning_level: 'high',
   },
   {
-    slug: 'fixture/legacy',
-    display_name: 'Legacy Fixture',
-    provider: 'fixture',
+    slug: 'neutral/helper-model',
+    display_name: 'Helper Model',
+    provider: 'neutral',
     supported_reasoning_levels: ['low', 'high'],
     default_reasoning_level: 'high',
   },
@@ -195,9 +198,9 @@ await actualModelSettings.save({
   disableSubagents: true,
   revision: initialModelState.settings.revision,
   models: [
-    { id: 'fixture/balanced', enabled: true, effort: '', ability: 3 },
-    { id: 'fixture/frontier', enabled: true, effort: 'high', ability: 5 },
-    { id: 'fixture/legacy', enabled: false, effort: 'high', ability: 4 },
+    { id: 'auto/codex-auto-review', enabled: true, effort: '', ability: 3 },
+    { id: 'api/gpt-6.1-sol', enabled: true, effort: 'high', ability: 5 },
+    { id: 'neutral/helper-model', enabled: false, effort: 'high', ability: 4 },
   ],
 });
 
@@ -538,16 +541,16 @@ try {
   assert.equal(modelFixture.settings.disableSubagents, true);
   interactionChecks.push('“不开新对话/不使用子代理”四种组合与恢复默认状态均真实保存');
 
-  const firstModelRow = document.querySelector('tr[data-model-id="fixture/balanced"]');
-  document.querySelector('button[aria-label="下移 fixture/balanced"]').click();
+  const firstModelRow = document.querySelector('tr[data-model-id="auto/codex-auto-review"]');
+  document.querySelector('button[aria-label="下移 auto/codex-auto-review"]').click();
   await until(
-    () => document.querySelector('#modelRows tr:first-child')?.dataset.modelId === 'fixture/frontier',
+    () => document.querySelector('#modelRows tr:first-child')?.dataset.modelId === 'api/gpt-6.1-sol',
     'model reorder',
   );
-  document.getElementById('modelSearch').value = 'legacy';
+  document.getElementById('modelSearch').value = 'helper';
   document.getElementById('modelSearch').dispatchEvent(new page.window.Event('input', { bubbles: true }));
   assert.equal(document.querySelectorAll('#modelRows tr[data-model-id]').length, 1);
-  assert.equal(document.querySelector('#modelRows tr')?.dataset.modelId, 'fixture/legacy');
+  assert.equal(document.querySelector('#modelRows tr')?.dataset.modelId, 'neutral/helper-model');
   document.getElementById('modelSearch').value = '';
   document.getElementById('modelSearch').dispatchEvent(new page.window.Event('input', { bubbles: true }));
   assert.ok(firstModelRow);
@@ -603,9 +606,9 @@ try {
     isolatedCatalog[0],
     isolatedCatalog[1],
     {
-      slug: 'fixture/new-model',
-      display_name: 'New Fixture Model',
-      provider: 'fixture',
+      slug: 'api/new-model',
+      display_name: 'New Model',
+      provider: 'api',
       supported_reasoning_levels: ['medium'],
       default_reasoning_level: 'medium',
     },
@@ -615,16 +618,16 @@ try {
   document.getElementById('modelSettings').click();
   await until(() => (
     document.getElementById('modelSettingsDialog').open
-    && document.querySelector('tr[data-model-id="fixture/new-model"]')
+    && document.querySelector('tr[data-model-id="api/new-model"]')
   ), 'model catalog open sync');
   await waitIdle(document, 'model catalog open sync idle');
   assert.ok(modelFixture.settings.revision > revisionBeforeCatalogSync);
-  assert.equal(document.querySelector('tr[data-model-id="fixture/legacy"]'), null);
+  assert.equal(document.querySelector('tr[data-model-id="neutral/helper-model"]'), null);
   assert.equal(document.querySelectorAll('#modelRows tr[data-model-id]').length, 3);
-  const newModelToggle = document.querySelector('input[aria-label="启用 fixture/new-model"]');
+  const newModelToggle = document.querySelector('input[aria-label="启用 api/new-model"]');
   assert.equal(newModelToggle.checked, false);
-  const preservedFrontierToggle = document.querySelector('input[aria-label="启用 fixture/frontier"]');
-  assert.equal(preservedFrontierToggle.checked, true);
+  const preservedApiToggle = document.querySelector('input[aria-label="启用 api/gpt-6.1-sol"]');
+  assert.equal(preservedApiToggle.checked, true);
   interactionChecks.push('每次打开设置成功读取目录，移除缺失项并补入默认关闭新项');
   closeDialog(document, 'modelSettingsDialog');
 
@@ -637,7 +640,7 @@ try {
   ), 'model catalog failure');
   await waitIdle(document, 'model catalog failure idle');
   assert.equal(modelFixture.settings.revision, revisionBeforeCatalogFailure);
-  assert.ok(document.querySelector('tr[data-model-id="fixture/new-model"]'));
+  assert.ok(document.querySelector('tr[data-model-id="api/new-model"]'));
   interactionChecks.push('目录读取失败显示错误且保留原模型设置与界面行');
   closeDialog(document, 'modelSettingsDialog');
 
@@ -694,7 +697,7 @@ try {
   assert.match(storedIntentBody, /按需读取最新 factory 模式 settings、project_get、worker_get/);
   assert.doesNotMatch(projectIntentBody, /一层执行，不得继续分派/);
   assert.doesNotMatch(projectIntentBody, /首页只显示项目名和一句概况/);
-  assert.doesNotMatch(projectIntentBody, /fixture\/balanced|fixture\/frontier|fixture\/legacy/);
+  assert.doesNotMatch(projectIntentBody, /auto\/codex-auto-review|api\/gpt-6\.1-sol|neutral\/helper-model/);
   assert.ok(projectIntentBody.length < 400, '宿主通知应只携带消息引用');
   interactionChecks.push('两个开关同开时派发文案准确，且不复制共同规则或模型目录');
 
@@ -719,16 +722,16 @@ try {
   document.getElementById('editWorkerTask').value = '完成四列工作对话列表。';
   document.getElementById('editWorkerAcceptance').value = '真实 DOM 与 store 联测通过。';
   document.getElementById('editWorkerSession').value = 'session-ui-test';
-  document.getElementById('workerModel').value = 'fixture/frontier';
+  document.getElementById('workerModel').value = 'api/gpt-6.1-sol';
   document.getElementById('workerModel').dispatchEvent(new page.window.Event('change', { bubbles: true }));
-  assert.match(textOf(document.getElementById('workerNameModelHint')), /模型：fixture\/frontier/);
+  assert.match(textOf(document.getElementById('workerNameModelHint')), /模型：api\/gpt-6\.1-sol/);
   submit(page.window, document.getElementById('workerForm'));
   await until(async () => (await store.call('project_get', { projectId: initialProject.id })).workers.length === 1, 'first worker submit');
   await waitIdle(document, 'first worker idle');
   await until(() => textOf(document.getElementById('workerRows')).includes('界面工作对话'), 'first worker rendered');
   let projectAfterFirstWorker = await store.call('project_get', { projectId: initialProject.id });
-  assert.equal(projectAfterFirstWorker.workers[0].model, 'fixture/frontier');
-  assert.match(textOf(document.getElementById('workerRows')), /模型：fixture\/frontier/);
+  assert.equal(projectAfterFirstWorker.workers[0].model, 'api/gpt-6.1-sol');
+  assert.match(textOf(document.getElementById('workerRows')), /模型：api\/gpt-6\.1-sol/);
   assert.equal(document.getElementById('workerDialog').open, false, '保存后回到列表，不自动打开详情');
   assert.equal(document.querySelectorAll('#workerRows tr').length, 1);
   assert.equal(document.querySelectorAll('#workerRows th').length, 0);
@@ -743,12 +746,26 @@ try {
     task: '旧版界面维护已结束。',
     acceptance: '记录可查看。',
     dependencies: [],
-    assignedModel: 'fixture/frontier',
+  });
+  const secondPrepared = await store.call('dispatch_prepare', {
+    projectId: initialProject.id,
+    workerId: secondSave.workerId,
+    target: { type: 'projectless' },
+  });
+  await store.call('dispatch_record', {
+    projectId: initialProject.id,
+    workerId: secondSave.workerId,
+    phase: 'host_report',
+    launchId: secondPrepared.launch.id,
+    hostReportedModel: 'api/gpt-6.1-sol',
+    hostReportSource: 'host_tool_result',
   });
   let projectState = await store.call('project_get', { projectId: initialProject.id });
   const secondWorker = projectState.workers.find((worker) => worker.id === secondSave.workerId);
   assert.equal(secondWorker.model, 'auto');
-  assert.equal(secondWorker.assignedModel, 'fixture/frontier');
+  assert.equal(secondWorker.assignedModel, null);
+  assert.equal(secondWorker.launch.hostReport.model, 'api/gpt-6.1-sol');
+  assert.equal(secondWorker.launch.hostReportStatus, 'unverified');
   await store.call('worker_state', {
     projectId: initialProject.id,
     workerId: secondWorker.id,
@@ -770,7 +787,10 @@ try {
   await waitIdle(document, 'refresh after fixtures idle');
   assert.equal(document.getElementById('historyPanel').open, false, 'closed 默认进入折叠历史');
   assert.equal(textOf(document.getElementById('workerRows')).includes('旧版工作对话'), false);
-  assert.match(textOf(document.getElementById('historyRows')), /自动选择 · 实际 fixture\/frontier/);
+  assert.match(
+    textOf(document.getElementById('historyRows')),
+    /自动选择 · 报告 api\/gpt-6\.1-sol（待核实）/,
+  );
   assert.match(textOf(rowFor(document, firstWorker.id)), /进行中/);
   assert.doesNotMatch(textOf(rowFor(document, firstWorker.id)), /\brunning\b/);
   assert.equal(document.getElementById('workerDialog').open, false, '刷新后仍不自动选首行');
@@ -797,9 +817,9 @@ try {
   const dispatchGuardRevision = modelFixture.settings.revision;
   document.getElementById('modelEnabled').checked = false;
   document.getElementById('modelEnabled').dispatchEvent(new page.window.Event('change', { bubbles: true }));
-  const frontierModelToggle = document.querySelector('input[aria-label="启用 fixture/frontier"]');
-  frontierModelToggle.checked = false;
-  frontierModelToggle.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  const apiModelToggle = document.querySelector('input[aria-label="启用 api/gpt-6.1-sol"]');
+  apiModelToggle.checked = false;
+  apiModelToggle.dispatchEvent(new page.window.Event('change', { bubbles: true }));
   submit(page.window, document.getElementById('modelSettingsForm'));
   await until(() => modelFixture.settings.revision === dispatchGuardRevision + 1, 'model dispatch guard save');
   await waitIdle(document, 'model dispatch guard idle');
@@ -850,13 +870,13 @@ try {
 
   rowFor(document, firstWorker.id).click();
   await until(() => document.getElementById('workerDialog').open, 'worker edit reopen');
-  assert.equal(document.getElementById('workerModel').value, 'fixture/frontier');
+  assert.equal(document.getElementById('workerModel').value, 'api/gpt-6.1-sol');
   const unavailableModelOption = [...document.getElementById('workerModel').options]
-    .find((option) => option.value === 'fixture/frontier');
+    .find((option) => option.value === 'api/gpt-6.1-sol');
   assert.equal(unavailableModelOption.disabled, true);
   assert.match(textOf(unavailableModelOption), /已禁用或不可用，请重新选择/);
   assert.match(textOf(document.getElementById('workerModelHint')), /当前模型已禁用或不可用/);
-  assert.match(textOf(document.getElementById('workerNameModelHint')), /模型：fixture\/frontier（不可用）/);
+  assert.match(textOf(document.getElementById('workerNameModelHint')), /模型：api\/gpt-6\.1-sol（不可用）/);
   document.getElementById('workerScope').value = '负责首页、四列列表、历史与详情弹窗。';
   document.getElementById('editWorkerTask').value = '完成精简首页并补边界测试。';
   document.getElementById('editWorkerAcceptance').value = '默认无详情且历史默认折叠。';
@@ -870,7 +890,7 @@ try {
   projectState = await store.call('project_get', { projectId: initialProject.id });
   assert.equal(
     projectState.workers.find((worker) => worker.id === firstWorker.id).model,
-    'fixture/frontier',
+    'api/gpt-6.1-sol',
     '编辑其他字段时不得静默清除已禁用的历史模型选择',
   );
   await until(() => textOf(rowFor(document, firstWorker.id)).includes('待确认'), 'worker edited state rendered');

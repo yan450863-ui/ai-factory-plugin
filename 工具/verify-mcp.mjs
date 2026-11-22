@@ -35,6 +35,15 @@ function entrypoint(tool, type) {
   return tool?._meta?.['openai/ui']?.entrypoints?.some((item) => item.type === type);
 }
 
+async function exists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertContainedTemp(target) {
   const resolved = path.resolve(target);
   const tempRoot = path.resolve(os.tmpdir());
@@ -48,6 +57,9 @@ function assertContainedTemp(target) {
 
 async function main() {
   const plugin = JSON.parse(await fs.readFile(path.join(pluginDir, 'plugin.json'), 'utf8'));
+  const compatPlugin = JSON.parse(
+    await fs.readFile(path.join(pluginDir, '.codex-plugin', 'plugin.json'), 'utf8'),
+  );
   const mcp = JSON.parse(await fs.readFile(path.join(pluginDir, 'mcp.json'), 'utf8'));
   const skill = await fs.readFile(path.join(pluginDir, 'skills', 'auto-factory', 'SKILL.md'), 'utf8');
   const teamSkill = await fs.readFile(path.join(pluginDir, 'skills', 'factory-team', 'SKILL.md'), 'utf8');
@@ -65,7 +77,9 @@ async function main() {
 
   assert.equal(plugin.$schema, 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json');
   assert.equal(plugin.name, 'codex-factory');
-  assert.equal(plugin.version, '0.4.2');
+  assert.equal(plugin.version, '0.4.5');
+  assert.equal(compatPlugin.name, 'codex-factory');
+  assert.equal(compatPlugin.version, plugin.version, '兼容 manifest 版本必须与主 manifest 一致');
   assert.equal(mcp.$schema, 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json');
   assert.equal(mcp.mcpServers.codex_factory.type, 'stdio');
   assert.match(skill, /^---\nname: auto-factory\n/m);
@@ -124,7 +138,7 @@ async function main() {
     stderr: 'pipe',
   });
   const client = new Client(
-    { name: 'codex-factory-mcp-verifier', version: '0.4.2' },
+    { name: 'codex-factory-mcp-verifier', version: '0.4.5' },
     { capabilities: {} },
   );
 
@@ -171,7 +185,7 @@ async function main() {
     ]) {
       assert.ok(byName.has(name), `缺少工具 ${name}`);
     }
-  assert.equal(tools.length, 13, '0.4.2 必须恰好暴露 13 个工具');
+  assert.equal(tools.length, 13, '0.4.5 必须恰好暴露 13 个工具');
     assert.ok(entrypoint(byName.get('factory_panel'), 'global'), 'factory_panel 缺少 global 入口');
     assert.ok(entrypoint(byName.get('factory_panel_tab'), 'thread'), 'factory_panel_tab 缺少 thread 入口');
 
@@ -316,7 +330,68 @@ async function main() {
     assert.equal(workerData.model, 'beta');
     assert.equal(workerData.state, 'planned');
     const firstTaskVersion = workerData.taskVersion;
-    const assigned = await client.callTool({
+    const missingPrompt = await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'prepare',
+        projectId,
+        workerId: 'model_worker',
+        prompt: '',
+        target: { type: 'projectless' },
+      },
+    });
+    assert.ok(missingPrompt.isError, '空 prompt 必须拒绝准备');
+    assert.match(missingPrompt.content?.[0]?.text || '', /DISPATCH_INCOMPLETE/);
+    const prepared = await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'prepare',
+        projectId,
+        workerId: 'model_worker',
+        target: { type: 'projectless' },
+      },
+    });
+    const preparedData = resultData(prepared);
+    assert.equal(preparedData.launchStatus, 'prepared');
+    assert.equal(preparedData.taskModel, 'beta');
+    assert.equal(preparedData.launchModel, 'beta');
+    assert.equal(preparedData.effort, 'low');
+    assert.equal(preparedData.effortField, 'thinking');
+    assert.match(preparedData.prompt, /验证 worker 模型引用/);
+    const schemaRetry = resultData(await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'record',
+        projectId,
+        workerId: 'model_worker',
+        phase: 'schema_error',
+        launchId: preparedData.launchId,
+        errorCode: 'SCHEMA',
+        errorMessage: '缺少字段',
+      },
+    }));
+    assert.equal(schemaRetry.launchId, preparedData.launchId);
+    assert.equal(schemaRetry.launchModel, 'beta');
+    assert.equal(schemaRetry.effort, 'low');
+    assert.equal(schemaRetry.prompt, preparedData.prompt);
+    assert.equal(schemaRetry.attempts, 1);
+    const reported = resultData(await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'record',
+        projectId,
+        workerId: 'model_worker',
+        phase: 'host_report',
+        launchId: preparedData.launchId,
+        hostReportedModel: 'beta',
+        hostReportSource: 'host_tool_result',
+      },
+    }));
+    assert.equal(reported.hostReportedModel, 'beta');
+    assert.equal(reported.hostReportStatus, 'unverified');
+    assert.equal(reported.assignedModel, null);
+    assert.equal(reported.assignedModelStatus, 'none');
+    const posthocAssigned = await client.callTool({
       name: 'factory_task',
       arguments: {
         action: 'save',
@@ -331,13 +406,11 @@ async function main() {
         dependencies: [],
         model: 'beta',
         assignedModel: 'beta',
-        revision: workerData.revision,
+        revision: reported.revision,
       },
     });
-    assert.ok(!assigned.isError, assigned.content?.[0]?.text ?? 'assignedModel 保存失败');
-    const assignedData = resultData(assigned);
-    assert.equal(assignedData.taskVersion, firstTaskVersion);
-    assert.equal(assignedData.assignedModel, 'beta');
+    assert.ok(posthocAssigned.isError, 'worker_save 不得事后补写 assignedModel');
+    assert.match(posthocAssigned.content?.[0]?.text || '', /ASSIGNED_MODEL_READ_ONLY/);
     const changed = await client.callTool({
       name: 'factory_task',
       arguments: {
@@ -348,21 +421,126 @@ async function main() {
         role: '实现',
         scope: '验证模型字段',
         files: ['src/**'],
-        task: '验证 worker 模型引用。',
+        task: '验证 worker 模型引用（新版本）。',
         acceptance: '指定与实际模型字段可保存。',
         dependencies: [],
-        model: 'alpha',
-        revision: assignedData.revision,
+        model: 'beta',
+        revision: reported.revision,
       },
     });
     assert.ok(!changed.isError, changed.content?.[0]?.text ?? '模型变更保存失败');
     const changedData = resultData(changed);
     assert.equal(changedData.taskVersion, firstTaskVersion + 1);
     assert.equal(changedData.state, 'needs_ack');
+    assert.equal(changedData.launch, null);
+    const disabledWorker = resultData(await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'save',
+        projectId,
+        id: 'disabled_worker',
+        name: '禁用模型执行者',
+        role: '实现',
+        scope: '验证禁用模型',
+        files: ['alpha/**'],
+        task: '验证禁用模型不默认回退。',
+        acceptance: 'prepare 拒绝。',
+        dependencies: [],
+        model: 'alpha',
+      },
+    }));
+    const disabledPrepare = await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'prepare',
+        projectId,
+        workerId: disabledWorker.workerId,
+        target: { type: 'projectless' },
+      },
+    });
+    assert.ok(disabledPrepare.isError, '未启用模型必须拒绝准备');
+    assert.match(disabledPrepare.content?.[0]?.text || '', /MODEL_NOT_ALLOWED/);
+
+    const partialTaskSave = resultData(await client.callTool({
+      name: 'factory_task',
+      arguments: {
+        action: 'save',
+        projectId,
+        workerId: 'model_worker',
+        sessionId: 'thread-partial-task',
+        revision: changedData.revision,
+      },
+    }));
+    assert.equal(partialTaskSave.sessionId, 'thread-partial-task');
+    const partialTaskFull = resultData(await client.callTool({
+      name: 'factory_task',
+      arguments: { action: 'get', projectId, workerId: 'model_worker', view: 'full' },
+    }));
+    assert.equal(partialTaskFull.worker.name, '模型执行者');
+    assert.equal(partialTaskFull.worker.task, '验证 worker 模型引用（新版本）。');
+    assert.deepEqual(partialTaskFull.worker.files, ['src/**']);
+    assert.equal(partialTaskFull.worker.model, 'beta');
+    const partialCallSave = resultData(await client.callTool({
+      name: 'factory_call',
+      arguments: {
+        action: 'worker_save',
+        args: {
+          projectId,
+          workerId: 'model_worker',
+          sessionId: 'thread-partial-call',
+          revision: partialTaskSave.revision,
+        },
+      },
+    }));
+    assert.equal(partialCallSave.sessionId, 'thread-partial-call');
+    const aliasConflict = await client.callTool({
+      name: 'factory_call',
+      arguments: {
+        action: 'worker_save',
+        args: {
+          projectId,
+          id: 'model_worker',
+          workerId: 'disabled_worker',
+          revision: partialCallSave.revision,
+        },
+      },
+    });
+    assert.ok(aliasConflict.isError, '不同 id/workerId 必须拒绝');
+    assert.match(aliasConflict.content?.[0]?.text || '', /INVALID_ARGUMENT/);
+    const incompleteCreate = await client.callTool({
+      name: 'factory_task',
+      arguments: { action: 'save', projectId, id: 'incomplete_worker', role: '实现' },
+    });
+    assert.ok(incompleteCreate.isError, '新建执行者仍须完整字段');
+    assert.match(incompleteCreate.content?.[0]?.text || '', /缺少 name/);
+    const missingProjectRoot = path.join(tempDir, 'not-created-root');
+    const rootError = await client.callTool({
+      name: 'factory_call',
+      arguments: {
+        action: 'project_save',
+        args: {
+          name: '缺失根目录',
+          root: missingProjectRoot,
+          requirements: '默认不创建。',
+          rules: '显式初始化。',
+          maxRetries: 1,
+        },
+      },
+    });
+    assert.ok(rootError.isError, '缺失项目根默认必须拒绝');
+    assert.match(rootError.content?.[0]?.text || '', /createRoot=true/);
+    assert.equal(await exists(missingProjectRoot), false);
     report.calls.push({
       name: 'factory_task',
       workerModel: changedData.model,
-      assignedDoesNotBumpTask: true,
+      preparedModel: preparedData.launchModel,
+      schemaRetryKeepsPack: true,
+      hostReportUnverified: true,
+      assignedReadOnly: true,
+      disabledModelRejected: true,
+      partialUpdatePreserved: true,
+      workerIdAlias: true,
+      createRootGuarded: true,
     });
 
     const fullRequirements = `完整需求-${'R'.repeat(4200)}`;
@@ -401,7 +579,7 @@ async function main() {
         task: longTask,
         acceptance: longAcceptance,
         dependencies: [],
-        sessionId: 'fixture-thread',
+        sessionId: 'thread-protocol-real',
       },
     }));
     assert.equal(protocolWorkerReceipt.taskVersion, 1);
@@ -436,7 +614,7 @@ async function main() {
         task: updatedTask,
         acceptance: longAcceptance,
         dependencies: [],
-        sessionId: 'fixture-thread',
+        sessionId: 'thread-protocol-real',
         revision: fullTask.revision,
       },
     }));
@@ -694,7 +872,7 @@ async function main() {
       },
     }));
     assert.match(coordinatorTask.worker.task, /protocol_worker/);
-    assert.match(coordinatorTask.worker.task, /fixture-thread/);
+    assert.match(coordinatorTask.worker.task, /thread-protocol-real/);
     assert.match(coordinatorTask.worker.task, /authorizedRecipients|已授权消息对象/);
     assert.match(coordinatorTask.worker.task, /一般处理范围/);
     assert.match(coordinatorTask.worker.task, /协调任务版本=1/);

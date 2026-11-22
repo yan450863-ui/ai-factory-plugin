@@ -4,12 +4,13 @@ English | [简体中文](README.md)
 
 AI Factory Plugin is a local plugin for Codex. It provides two collaboration modes, Software Factory and Team, in one entry point, together with shared model management, projects, tasks, messages, decisions, and evidence. Codex still creates conversations, runs tasks and commands, and performs acceptance. The plugin does not start a separate model CLI, background scheduler, or resident daemon.
 
-The public version is **0.4.2**. The English title is “AI Factory Plugin”; the plugin UI display name is the Chinese name “AI工厂插件”. The internal plugin ID remains `codex-factory`, and the local marketplace name is `ai-factory-plugin`. Keeping the internal ID preserves compatibility with existing tasks, skill references, and data formats.
+The public version is **0.4.5**. The English title is “AI Factory Plugin”; the plugin UI display name is the Chinese name “AI工厂插件”. The internal plugin ID remains `codex-factory`, and the local marketplace name is `ai-factory-plugin`. Keeping the internal ID preserves compatibility with existing tasks, skill references, and data formats.
 
 ## What it does
 
 - Shows a project summary and four worker-conversation columns: name, responsibility, current task, and state.
 - Matches work to models by configured priority and capability level, and distinguishes provider failures from capability gaps.
+- Prepares native dispatch arguments with an explicit prompt, concrete model, thinking/effort, and target; schema-error retries keep the same pack. Task-specified, requested, and host-reported models stay separate, and legacy `assignedModel` is marked unverified.
 - In Software Factory mode, keeps the orchestrator focused on communication, dispatch, coordination, and acceptance while worker conversations perform implementation; Team mode has the main conversation perform the core work directly.
 - Stores tasks, rules, messages, decisions, and evidence with on-demand retrieval instead of injecting the full history every turn.
 - Enables optional long-task coordination inside real host conversations without creating a background service.

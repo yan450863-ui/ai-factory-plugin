@@ -5,7 +5,7 @@ import {
 } from '@modelcontextprotocol/ext-apps';
 import { createModelSettingsPanel } from './model-panel.mjs';
 
-const APP_VERSION = '0.4.2';
+const APP_VERSION = '0.4.5';
 const app = new App({ name: 'AI工厂插件', version: APP_VERSION });
 const $ = (id) => document.getElementById(id);
 
@@ -359,29 +359,57 @@ function assignedWorkerModel(worker) {
   );
 }
 
+function workerLaunch(worker) {
+  return worker?.launch || worker?.worker?.launch || null;
+}
+
+function launchReportedModel(launch) {
+  return launch?.hostReport?.model || launch?.hostReportedModel || '';
+}
+
 function isAvailableModel(modelId) {
   return modelPanel?.availableModels().some((model) => model.id === modelId) || false;
 }
 
 function workerModelLabel(worker) {
   const selected = workerModel(worker);
+  const launch = workerLaunch(worker);
   const assigned = assignedWorkerModel(worker);
-  if (selected === 'auto') return assigned ? `自动选择 · 实际 ${assigned}` : '自动选择';
+  if (selected === 'auto') {
+    const reported = launchReportedModel(launch);
+    if (reported) {
+      return `自动选择 · 报告 ${reported}（待核实）`;
+    }
+    if (launch?.model) return `自动选择 · 请求 ${launch.model}`;
+    if (assigned) return `自动选择 · 历史 ${assigned}（未核实）`;
+    return '自动选择';
+  }
   const knownCatalog = Boolean(state.modelData?.catalog?.length);
   const unavailable = knownCatalog && !isAvailableModel(selected);
   return `模型：${selected}${unavailable ? '（已禁用或不可用）' : ''}`;
 }
 
-function workerModelHint(modelId = $('workerModel').value, assignedModel = assignedWorkerModel(state.workerData?.worker)) {
+function workerModelHint(
+  modelId = $('workerModel').value,
+  assignedModel = assignedWorkerModel(state.workerData?.worker),
+  launch = workerLaunch(state.workerData?.worker),
+) {
   if (!modelId || modelId === 'auto') {
+    const reported = launchReportedModel(launch);
+    if (reported) {
+      return `自动选择；宿主报告 ${reported}，记录待核实，不等于已证明实际路由。`;
+    }
+    if (launch?.model) {
+      return `自动选择已解析为 ${launch.model}；这是启动请求，不等于宿主实际路由。`;
+    }
     return assignedModel
-      ? `自动选择；最近实际使用 ${assignedModel}。`
+      ? `自动选择；历史 assignedModel ${assignedModel} 未核实。`
       : '自动选择会从当前启用且可用的模型中选择。';
   }
   if (!isAvailableModel(modelId)) {
     return '当前模型已禁用或不可用；保存会保留原选择，请明确改选。';
   }
-  return '已指定模型；模型档位与能力沿用全局设置。';
+  return '已指定模型；保存不会证明宿主实际路由。档位与能力沿用全局设置。';
 }
 
 function renderWorkerModelOptions(worker = null) {
@@ -410,10 +438,18 @@ function renderWorkerModelOptions(worker = null) {
     : 'auto';
   const hint = $('workerModelHint');
   const unavailable = selected !== 'auto' && !isAvailableModel(selected);
-  hint.textContent = workerModelHint(select.value, assignedWorkerModel(worker));
+  hint.textContent = workerModelHint(select.value, assignedWorkerModel(worker), workerLaunch(worker));
   hint.className = `form-note${unavailable ? ' error' : ''}`;
+  const launch = workerLaunch(worker);
+  const reported = launchReportedModel(launch);
   $('workerNameModelHint').textContent = selected === 'auto'
-    ? (assignedWorkerModel(worker) ? `自动选择 · 实际 ${assignedWorkerModel(worker)}` : '自动选择')
+    ? (reported
+        ? `自动选择 · 报告 ${reported}（待核实）`
+        : launch?.model
+          ? `自动选择 · 请求 ${launch.model}`
+          : assignedWorkerModel(worker)
+            ? `自动选择 · 历史 ${assignedWorkerModel(worker)}（未核实）`
+            : '自动选择')
     : `模型：${selected}${unavailable ? '（不可用）' : ''}`;
   $('workerNameModelHint').className = `worker-model-label${unavailable ? ' unavailable' : ''}`;
 }
@@ -976,7 +1012,7 @@ async function dispatchIntentInternal(kind, workerId = state.workerData?.workerI
     close: '实际停止对应原生任务后再关闭记录',
     continue: '核实并继续已有原生执行者',
     ack: '通知执行者本人读取最新 worker_get 后确认；总指挥不得代替执行者 ack',
-    create: '按软件工厂设置创建或继续一层原生工作对话，禁止继续分派',
+    create: '先用 factory_task action=prepare 生成 prompt/model/thinking/target，再创建或继续一层原生工作对话；禁止继续分派',
     'create-or-check': '检查当前项目是否已有可复用执行者',
   }[kind] || `处理 ${kind}`;
   const body = [
@@ -984,7 +1020,12 @@ async function dispatchIntentInternal(kind, workerId = state.workerData?.workerI
     `project: ${projectId}`,
     worker ? `worker: ${worker.id}` : 'worker: 当前项目',
     `用户增量：${actionText}；对象 ${target}`,
-    ...(worker ? [`指定模型：${workerModel(worker)}${assignedWorkerModel(worker) ? `；最近实际：${assignedWorkerModel(worker)}` : ''}`] : []),
+    ...(worker ? [
+      `任务指定模型：${workerModel(worker)}`
+      + `${workerLaunch(worker)?.model ? `；启动请求：${workerLaunch(worker).model}` : ''}`
+      + `${launchReportedModel(workerLaunch(worker)) ? `；宿主报告：${launchReportedModel(workerLaunch(worker))}（待核实）` : ''}`
+      + `${assignedWorkerModel(worker) ? `；历史 assignedModel：${assignedWorkerModel(worker)}（未核实）` : ''}`,
+    ] : []),
     ...(behaviorHint ? [`开关：${behaviorHint}`] : []),
     '请按需读取最新 factory 模式 settings、project_get、worker_get；后续只传 delta + refs。',
   ].filter(Boolean).join('\n');

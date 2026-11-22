@@ -1,14 +1,14 @@
 {
-  "builtAt": "2026-11-22T05:38:57.776Z",
-  "version": "0.4.2",
+  "builtAt": "2026-11-22T07:05:41.515Z",
+  "version": "0.4.5",
   "artifacts": {
     "mcp.mjs": {
-      "bytes": 1638179,
-      "sha256": "8ef90dffcb14b5d5a4d7ca0ffe42e50883517f2dbc79aa938ce4771c731b4423"
+      "bytes": 1685435,
+      "sha256": "91dd482d7e780528cb7d4dd7a3d7fc523fe969017cff2e7eb313017be1dd6630"
     },
     "panel.html": {
-      "bytes": 612799,
-      "sha256": "ec01a7069755c875a2b5e8a005f407cc1f5aef52a007fb1d1a35e58ed586ad64"
+      "bytes": 614066,
+      "sha256": "213f6fd028a680035326a7de24996a478dd254fb00c5788dfc280ddb91b4d870"
     }
   }
 }

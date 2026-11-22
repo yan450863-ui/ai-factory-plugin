@@ -43,6 +43,17 @@ const LOCK_OWNER = 'owner.json';
 const LOCK_TIMEOUT_MS = positiveInteger(process.env.CODEX_FACTORY_LOCK_TIMEOUT_MS, 20_000);
 const LOCK_STALE_MS = positiveInteger(process.env.CODEX_FACTORY_LOCK_STALE_MS, 120_000);
 const MAX_LOCK_AGE_MS = Math.max(LOCK_STALE_MS, 10 * 60_000);
+const DISPATCH_TOOLS = Object.freeze(['create_thread', 'spawn_agent']);
+const DISPATCH_STATUSES = Object.freeze([
+  'prepared',
+  'requested',
+  'host_reported',
+  'blocked',
+  'failed',
+  'cancelled',
+]);
+const HOST_REPORT_STATUSES = Object.freeze(['none', 'unverified']);
+const ASSIGNED_MODEL_STATUSES = Object.freeze(['none', 'legacy_unverified']);
 
 function positiveInteger(value, fallback) {
   const number = Number(value);
@@ -231,6 +242,98 @@ function normalizeMessage(record, projectId) {
   };
 }
 
+function normalizeHostReport(value) {
+  if (!value || typeof value !== 'object') return null;
+  const model = typeof value.model === 'string' && value.model.trim()
+    ? optionalString(value.model, 'launch.hostReport.model', LIMITS.model)
+    : null;
+  if (!model) return null;
+  return {
+    model,
+    source: typeof value.source === 'string'
+      ? optionalString(value.source, 'launch.hostReport.source', 80)
+      : 'caller_submission',
+    tool: DISPATCH_TOOLS.includes(value.tool) ? value.tool : null,
+    sessionId: typeof value.sessionId === 'string' && value.sessionId
+      ? optionalString(value.sessionId, 'launch.hostReport.sessionId', LIMITS.sessionId)
+      : null,
+    status: value.status === 'unverified' ? 'unverified' : 'unverified',
+    at: value.at ? normalizeDate(value.at, nowIso()) : null,
+  };
+}
+
+function normalizeLaunch(value) {
+  if (!value || typeof value !== 'object') return null;
+  const prompt = typeof value.prompt === 'string' && value.prompt.trim()
+    ? optionalString(value.prompt, 'launch.prompt', LIMITS.dispatchPrompt)
+    : null;
+  const model = typeof value.model === 'string' && value.model.trim()
+    ? optionalString(value.model, 'launch.model', LIMITS.model)
+    : null;
+  if (!prompt || !model) return null;
+  const status = DISPATCH_STATUSES.includes(value.status) ? value.status : 'prepared';
+  const tool = DISPATCH_TOOLS.includes(value.tool) ? value.tool : 'create_thread';
+  const hostReport = normalizeHostReport(value.hostReport);
+  return {
+    id: normalizeId(value.id ?? makeId('dp'), 'launch.id'),
+    status,
+    tool,
+    prompt,
+    promptHash: typeof value.promptHash === 'string'
+      ? optionalString(value.promptHash, 'launch.promptHash', 64)
+      : crypto.createHash('sha256').update(prompt).digest('hex'),
+    promptChars: prompt.length,
+    model,
+    modelSource: value.modelSource === 'auto' ? 'auto' : 'specified',
+    effort: typeof value.effort === 'string' && value.effort
+      ? optionalString(value.effort, 'launch.effort', LIMITS.dispatchEffort)
+      : null,
+    effortField: value.effortField === 'reasoning_effort'
+      ? 'reasoning_effort'
+      : value.effortField === 'thinking' ? 'thinking' : null,
+    target: value.target && typeof value.target === 'object' ? clone(value.target) : null,
+    requestId: typeof value.requestId === 'string' && value.requestId
+      ? optionalString(value.requestId, 'launch.requestId', LIMITS.requestId)
+      : null,
+    attempts: integer(value.attempts ?? 0, 'launch.attempts', { min: 0 }),
+    lastError: value.lastError && typeof value.lastError === 'object'
+      ? {
+          code: typeof value.lastError.code === 'string'
+            ? optionalString(value.lastError.code, 'launch.lastError.code', LIMITS.dispatchErrorCode)
+            : null,
+          message: typeof value.lastError.message === 'string'
+            ? optionalString(value.lastError.message, 'launch.lastError.message', LIMITS.dispatchErrorMessage)
+            : '',
+        }
+      : null,
+    sessionId: typeof value.sessionId === 'string' && value.sessionId
+      ? optionalString(value.sessionId, 'launch.sessionId', LIMITS.sessionId)
+      : null,
+    requestedAt: value.requestedAt ? normalizeDate(value.requestedAt, nowIso()) : null,
+    hostReport,
+    hostReportStatus: hostReport ? 'unverified' : 'none',
+    modelMismatch: value.modelMismatch === true,
+    createdAt: value.createdAt ? normalizeDate(value.createdAt, nowIso()) : nowIso(),
+    updatedAt: value.updatedAt ? normalizeDate(value.updatedAt, nowIso()) : nowIso(),
+  };
+}
+
+function normalizeAssignedModel(worker) {
+  const raw = typeof worker.assignedModel === 'string' && worker.assignedModel.trim()
+    ? optionalString(worker.assignedModel, 'worker.assignedModel', LIMITS.model)
+    : null;
+  let status = ASSIGNED_MODEL_STATUSES.includes(worker.assignedModelStatus)
+    ? worker.assignedModelStatus
+    : null;
+  if (!status) status = raw ? 'legacy_unverified' : 'none';
+  if (status === 'legacy_unverified' && !raw) status = 'none';
+  return {
+    assignedModel: status === 'none' ? null : raw,
+    assignedModelStatus: status,
+    assignedModelSource: status === 'legacy_unverified' ? 'legacy' : null,
+  };
+}
+
 function normalizeWorker(worker, project) {
   assertPlainObject(worker, 'worker');
   const fallback = nowIso();
@@ -249,9 +352,8 @@ function normalizeWorker(worker, project) {
   const model = typeof worker.model === 'string' && worker.model.trim()
     ? optionalString(worker.model, 'worker.model', LIMITS.model)
     : 'auto';
-  const assignedModel = typeof worker.assignedModel === 'string' && worker.assignedModel.trim()
-    ? optionalString(worker.assignedModel, 'worker.assignedModel', LIMITS.model)
-    : null;
+  const assigned = normalizeAssignedModel(worker);
+  const launch = normalizeLaunch(worker.launch);
   const roleKind = WORKER_ROLE_KINDS.includes(worker.roleKind)
     ? worker.roleKind
     : 'worker';
@@ -281,7 +383,10 @@ function normalizeWorker(worker, project) {
     refs,
     sessionId,
     model,
-    assignedModel,
+    assignedModel: assigned.assignedModel,
+    assignedModelStatus: assigned.assignedModelStatus,
+    assignedModelSource: assigned.assignedModelSource,
+    launch,
     sessionStatus: sessionId ? 'recorded' : 'none',
     sessionRecordedAt: sessionId
       ? normalizeDate(worker.sessionRecordedAt, fallback)
@@ -720,26 +825,91 @@ function applyRuleChange(project, requirements, rules) {
   return true;
 }
 
-function ownershipPrefix(file) {
-  const wildcardIndex = file.search(/[*?[\]{}]/);
-  if (wildcardIndex < 0) return { prefix: file, wildcard: false };
-  const beforeWildcard = file.slice(0, wildcardIndex);
-  const slash = beforeWildcard.lastIndexOf('/');
-  return {
-    prefix: slash < 0 ? '' : beforeWildcard.slice(0, slash + 1),
-    wildcard: true,
-  };
+function hasGlob(value) {
+  return /[*?[\]{}]/.test(value);
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function globSegmentRegex(segment) {
+  let pattern = '^';
+  for (let index = 0; index < segment.length; index += 1) {
+    const character = segment[index];
+    if (character === '*') {
+      pattern += '[^/]*';
+    } else if (character === '?') {
+      pattern += '[^/]';
+    } else if (character === '[') {
+      const end = segment.indexOf(']', index + 1);
+      if (end < 0) {
+        pattern += '\\[';
+      } else {
+        let content = segment.slice(index + 1, end);
+        if (content.startsWith('!')) content = `^${content.slice(1)}`;
+        pattern += `[${content}]`;
+        index = end;
+      }
+    } else if (character === '{') {
+      const end = segment.indexOf('}', index + 1);
+      if (end < 0) {
+        pattern += '\\{';
+      } else {
+        const choices = segment.slice(index + 1, end).split(',');
+        pattern += `(?:${choices.map(escapeRegex).join('|')})`;
+        index = end;
+      }
+    } else {
+      pattern += escapeRegex(character);
+    }
+  }
+  return new RegExp(`${pattern}$`);
+}
+
+function globSegmentOverlap(left, right) {
+  if (left === right) return true;
+  const leftGlob = hasGlob(left);
+  const rightGlob = hasGlob(right);
+  if (!leftGlob && !rightGlob) return false;
+  if (left === '*' || right === '*') return true;
+  if (!leftGlob) return globSegmentRegex(right).test(left);
+  if (!rightGlob) return globSegmentRegex(left).test(right);
+  const leftPrefix = left.split(/[*?[\]{}]/, 1)[0];
+  const rightPrefix = right.split(/[*?[\]{}]/, 1)[0];
+  const common = Math.min(leftPrefix.length, rightPrefix.length);
+  for (let index = 0; index < common; index += 1) {
+    if (leftPrefix[index] !== rightPrefix[index]) return false;
+  }
+  return true;
+}
+
+function globPathsOverlap(leftSegments, rightSegments, leftIndex = 0, rightIndex = 0) {
+  if (leftIndex >= leftSegments.length && rightIndex >= rightSegments.length) return true;
+  if (leftSegments[leftIndex] === '**') {
+    if (globPathsOverlap(leftSegments, rightSegments, leftIndex + 1, rightIndex)) return true;
+    if (rightIndex < rightSegments.length) {
+      return globPathsOverlap(leftSegments, rightSegments, leftIndex, rightIndex + 1);
+    }
+    return false;
+  }
+  if (rightSegments[rightIndex] === '**') {
+    if (globPathsOverlap(leftSegments, rightSegments, leftIndex, rightIndex + 1)) return true;
+    if (leftIndex < leftSegments.length) {
+      return globPathsOverlap(leftSegments, rightSegments, leftIndex + 1, rightIndex);
+    }
+    return false;
+  }
+  if (leftIndex >= leftSegments.length || rightIndex >= rightSegments.length) {
+    return true;
+  }
+  if (!globSegmentOverlap(leftSegments[leftIndex], rightSegments[rightIndex])) return false;
+  return globPathsOverlap(leftSegments, rightSegments, leftIndex + 1, rightIndex + 1);
 }
 
 function pathsOverlap(left, right) {
   if (left === right) return true;
-  const leftOwnership = ownershipPrefix(left);
-  const rightOwnership = ownershipPrefix(right);
-  if (!leftOwnership.wildcard && !rightOwnership.wildcard) return false;
-  const leftPrefix = leftOwnership.prefix;
-  const rightPrefix = rightOwnership.prefix;
-  if (leftPrefix === '' || rightPrefix === '') return true;
-  return leftPrefix.startsWith(rightPrefix) || rightPrefix.startsWith(leftPrefix);
+  return globPathsOverlap(left.split('/'), right.split('/'));
 }
 
 function assertFileOwnership(project, workerId, files, state) {
@@ -977,13 +1147,40 @@ async function withProcessLock(dataDir, fn) {
 async function saveProject(args, state) {
   assertKnownKeys(
     args,
-    ['id', 'name', 'root', 'requirements', 'rules', 'maxRetries', 'revision'],
+    ['id', 'name', 'root', 'requirements', 'rules', 'maxRetries', 'createRoot', 'revision'],
     'project_save',
   );
   const name = requiredString(args.name, 'name', LIMITS.projectName);
   const requestedRoot = requiredString(args.root, 'root', LIMITS.projectRoot);
-  const rootStat = await pathState(requestedRoot);
-  if (!rootStat?.isDirectory()) fail('INVALID_ARGUMENT', `项目根目录不存在：${requestedRoot}`);
+  let rootStat = await pathState(requestedRoot);
+  if (!rootStat) {
+    if (args.createRoot !== true) {
+      fail(
+        'INVALID_ARGUMENT',
+        `项目根目录不存在：${requestedRoot}。请先创建该目录，或显式传 createRoot=true 仅创建最后一级目录。`,
+        { root: requestedRoot, canCreate: true },
+      );
+    }
+    try {
+      await fs.mkdir(requestedRoot);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        fail(
+          'INVALID_ARGUMENT',
+          `项目根的父目录不存在：${requestedRoot}。请先创建父目录，再重试。`,
+          { root: requestedRoot, canCreate: false },
+        );
+      }
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    rootStat = await pathState(requestedRoot);
+  }
+  if (!rootStat?.isDirectory()) {
+    fail('INVALID_ARGUMENT', `项目根路径不是目录：${requestedRoot}`, {
+      root: requestedRoot,
+      canCreate: false,
+    });
+  }
   const root = await fs.realpath(requestedRoot);
   const id = args.id === undefined ? undefined : normalizeId(args.id, 'id');
   const existing = id ? state.projects.get(id) : undefined;
@@ -1074,6 +1271,7 @@ async function saveWorker(args, state, modelSettings) {
     [
       'projectId',
       'id',
+      'workerId',
       'name',
       'role',
       'roleKind',
@@ -1091,7 +1289,17 @@ async function saveWorker(args, state, modelSettings) {
     'worker_save',
   );
   const project = getProject(state, args.projectId, { forWrite: true });
-  const requestedId = args.id === undefined ? undefined : normalizeId(args.id, 'id');
+  const idAlias = args.id === undefined ? undefined : normalizeId(args.id, 'id');
+  const workerIdAlias = args.workerId === undefined
+    ? undefined
+    : normalizeId(args.workerId, 'workerId');
+  if (idAlias !== undefined && workerIdAlias !== undefined && idAlias !== workerIdAlias) {
+    fail('INVALID_ARGUMENT', 'id 与 workerId 指向不同执行者，请只保留一个值', {
+      id: idAlias,
+      workerId: workerIdAlias,
+    });
+  }
+  const requestedId = idAlias ?? workerIdAlias;
   const existing = requestedId
     ? project.workers.find((worker) => worker.id === requestedId)
     : undefined;
@@ -1127,9 +1335,14 @@ async function saveWorker(args, state, modelSettings) {
   const model = args.model === undefined
     ? existing?.model ?? 'auto'
     : optionalString(args.model, 'model', LIMITS.model) || 'auto';
-  const assignedModel = args.assignedModel === undefined
-    ? existing?.assignedModel ?? null
-    : optionalString(args.assignedModel, 'assignedModel', LIMITS.model) || null;
+  if (args.assignedModel !== undefined
+    && (optionalString(args.assignedModel, 'assignedModel', LIMITS.model) || null)
+      !== (existing?.assignedModel ?? null)) {
+    fail(
+      'ASSIGNED_MODEL_READ_ONLY',
+      'assignedModel 只保留历史记录，不能通过 worker_save 事后补写；宿主模型回执请用 factory_task action=record。',
+    );
+  }
   if (model !== 'auto') {
     const unchangedUnavailable = existing?.model === model;
     if (!unchangedUnavailable) {
@@ -1194,12 +1407,23 @@ async function saveWorker(args, state, modelSettings) {
   );
   worker.dependencies = dependencies;
   worker.model = model;
-  worker.assignedModel = assignedModel;
+  worker.assignedModel = existing?.assignedModel ?? null;
+  worker.assignedModelStatus = existing?.assignedModelStatus
+    ?? (worker.assignedModel ? 'legacy_unverified' : 'none');
+  worker.assignedModelSource = existing?.assignedModelSource
+    ?? (worker.assignedModel ? 'legacy' : null);
+  worker.launch = existing?.launch ? clone(existing.launch) : null;
   worker.sessionId = sessionId || null;
   worker.sessionStatus = worker.sessionId ? 'recorded' : 'none';
   worker.sessionRecordedAt = worker.sessionId
     ? (args.sessionId === undefined ? existing?.sessionRecordedAt : nowIso())
     : null;
+  if (existing && (existing.sessionId || null) !== (worker.sessionId || null)) {
+    worker.assignedModel = null;
+    worker.assignedModelStatus = 'none';
+    worker.assignedModelSource = null;
+    worker.launch = null;
+  }
   worker.worktree = worktree || null;
   worker.depth = 1;
   worker.sessionLive = false;
@@ -1219,6 +1443,7 @@ async function saveWorker(args, state, modelSettings) {
       worker.state = 'needs_ack';
       worker.completedAt = null;
       worker.refs = [];
+      worker.launch = null;
       assertFileOwnership(project, worker.id, worker.files, worker.state);
     }
     touchWorker(worker);
@@ -1248,6 +1473,9 @@ async function saveWorker(args, state, modelSettings) {
     sessionId: worker.sessionId,
     model: worker.model,
     assignedModel: worker.assignedModel,
+    assignedModelStatus: worker.assignedModelStatus,
+    assignedModelSource: worker.assignedModelSource,
+    launch: worker.launch,
     sessionStatus: worker.sessionStatus,
     sessionLive: worker.sessionLive,
     taskVersion: worker.taskVersion,
@@ -1277,6 +1505,10 @@ function readWorker(args, state) {
     taskVersion: worker.taskVersion,
     acknowledgedTaskVersion: worker.acknowledgedTaskVersion,
     sessionLive: worker.sessionLive,
+    assignedModel: worker.assignedModel,
+    assignedModelStatus: worker.assignedModelStatus,
+    assignedModelSource: worker.assignedModelSource,
+    launch: worker.launch ? clone(worker.launch) : null,
     worker: clone(worker),
     dependencies,
     blockedBy: dependencies.filter((dependency) => dependency.state !== 'done'),
@@ -1308,11 +1540,370 @@ function readWorkerStatus(args, state) {
     taskChanged,
     requirementsChanged,
     refreshRequired: taskChanged || requirementsChanged,
+    launch: worker.launch ? {
+      id: worker.launch.id,
+      status: worker.launch.status,
+      tool: worker.launch.tool,
+      model: worker.launch.model,
+      effort: worker.launch.effort,
+      effortField: worker.launch.effortField,
+      promptChars: worker.launch.promptChars,
+      attempts: worker.launch.attempts,
+      hostReportedModel: worker.launch.hostReport?.model ?? null,
+      hostReportStatus: worker.launch.hostReportStatus,
+      sessionId: worker.launch.sessionId,
+    } : null,
+    assignedModel: worker.assignedModel,
+    assignedModelStatus: worker.assignedModelStatus,
     requiresFullTask: taskChanged || requirementsChanged,
     sessionBound: Boolean(worker.sessionId),
     sessionLive: false,
     updatedAt: worker.updatedAt,
   };
+}
+
+function clearAssignedModel(worker) {
+  worker.assignedModel = null;
+  worker.assignedModelStatus = 'none';
+  worker.assignedModelSource = null;
+}
+
+function dispatchPrompt(project, worker) {
+  return [
+    `你是软件工厂项目「${project.name}」的一层工作对话「${worker.name}」。`,
+    `项目根：${project.root}`,
+    `工厂标识：projectId=${project.id}，workerId=${worker.id}，taskVersion=${worker.taskVersion}，requirementsVersion=${project.requirementsVersion}。`,
+    '开始前先用 factory_task action=get view=full 读取自己的完整任务、需求、规则和验收，确认版本后再执行。',
+    '',
+    `任务：\n${worker.task}`,
+    '',
+    `验收：\n${worker.acceptance}`,
+    '',
+    `职责范围：\n${worker.scope}`,
+    '',
+    '边界：只做本任务，不创建或分派下属代理/对话，不操作原问题线程，不执行 git 提交或发布。',
+    '完成后回传 checks、refs、block；需要用户决定时明确说明，不擅自扩大范围。',
+  ].join('\n');
+}
+
+function normalizeDispatchTarget(tool, target) {
+  if (tool === 'spawn_agent') return { kind: 'current_chat' };
+  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+    fail('DISPATCH_INCOMPLETE', 'create_thread 需要宿主 target（项目/项目外/云环境）。', {
+      missing: ['target'],
+    });
+  }
+  const type = typeof target.type === 'string' ? target.type : '';
+  if (!['local', 'project', 'projectless', 'codexCloud', 'chatgptWorkCloud'].includes(type)) {
+    fail('DISPATCH_INCOMPLETE', `create_thread target.type 不受支持：${type || '缺失'}`, {
+      missing: ['target.type'],
+    });
+  }
+  if (type === 'project') {
+    if (typeof target.projectId !== 'string' || !target.projectId.trim()) {
+      fail('DISPATCH_INCOMPLETE', 'project target 需要 projectId。', { missing: ['target.projectId'] });
+    }
+    const environment = target.environment;
+    if (!environment || typeof environment !== 'object') {
+      fail('DISPATCH_INCOMPLETE', 'project target 需要 environment。', {
+        missing: ['target.environment'],
+      });
+    }
+    if (!['local', 'worktree'].includes(environment.type)) {
+      fail('DISPATCH_INCOMPLETE', 'project target.environment.type 必须是 local 或 worktree。', {
+        missing: ['target.environment.type'],
+      });
+    }
+    if (environment.type === 'worktree'
+      && (!environment.startingState || typeof environment.startingState !== 'object')) {
+      fail('DISPATCH_INCOMPLETE', 'worktree environment 需要 startingState。', {
+        missing: ['target.environment.startingState'],
+      });
+    }
+  }
+  if (type === 'codexCloud'
+    && (typeof target.environmentConfigId !== 'string' || !target.environmentConfigId.trim())) {
+    fail('DISPATCH_INCOMPLETE', 'codexCloud target 需要 environmentConfigId。', {
+      missing: ['target.environmentConfigId'],
+    });
+  }
+  return clone(target);
+}
+
+async function resolveDispatchModel(worker, modelSettings) {
+  let data;
+  try {
+    data = await modelSettings?.read?.();
+  } catch (error) {
+    fail('MODEL_SETTINGS_UNAVAILABLE', `无法读取模型设置：${error.message}`);
+  }
+  if (!data?.settings || !Array.isArray(data.catalog) || !Array.isArray(data.settings.models)) {
+    fail('MODEL_SETTINGS_UNAVAILABLE', '模型设置或目录不可用，不能准备派发参数。');
+  }
+  const available = new Set(
+    data.catalog.filter((item) => item.available !== false).map((item) => item.id),
+  );
+  const enabled = data.settings.models.filter((item) => item.enabled && available.has(item.id));
+  if (worker.model === 'auto') {
+    const first = enabled[0];
+    if (!first) {
+      fail('DISPATCH_INCOMPLETE', '自动选择没有可用的已启用模型，不能靠宿主默认模型补齐。', {
+        missing: ['model'],
+      });
+    }
+    return {
+      model: first.id,
+      source: 'auto',
+      row: first,
+      entry: data.catalog.find((item) => item.id === first.id),
+    };
+  }
+  if (!available.has(worker.model)) {
+    fail('MODEL_NOT_ALLOWED', `指定模型不在当前可用目录：${worker.model}`, {
+      model: worker.model,
+    });
+  }
+  const row = enabled.find((item) => item.id === worker.model);
+  if (!row) {
+    fail('MODEL_NOT_ALLOWED', `指定模型未启用：${worker.model}`, { model: worker.model });
+  }
+  return {
+    model: worker.model,
+    source: 'specified',
+    row,
+    entry: data.catalog.find((item) => item.id === worker.model),
+  };
+}
+
+function resolveDispatchEffort(tool, requested, row, entry) {
+  const efforts = Array.isArray(entry?.efforts) ? entry.efforts : [];
+  let effort = requested === undefined ? (row?.effort || entry?.defaultEffort || null) : requested;
+  if (effort !== null && typeof effort !== 'string') {
+    fail('INVALID_ARGUMENT', 'effort 必须是字符串');
+  }
+  effort = effort?.trim() || null;
+  if (effort && efforts.length > 0 && !efforts.includes(effort)) {
+    fail('EFFORT_NOT_SUPPORTED', `模型 ${entry?.id || row?.id} 不支持 effort=${effort}`, {
+      effort,
+      allowed: efforts,
+    });
+  }
+  if (effort && efforts.length === 0) {
+    fail('EFFORT_NOT_SUPPORTED', `模型 ${entry?.id || row?.id} 未声明支持的 effort`, { effort });
+  }
+  if (!effort) return { effort: null, effortField: null };
+  return {
+    effort,
+    effortField: tool === 'create_thread' ? 'thinking' : 'reasoning_effort',
+  };
+}
+
+function launchReceipt(project, worker) {
+  return {
+    projectId: project.id,
+    projectRevision: project.revision,
+    workerId: worker.id,
+    revision: worker.revision,
+    taskVersion: worker.taskVersion,
+    requirementsVersion: project.requirementsVersion,
+    model: worker.model,
+    assignedModel: worker.assignedModel,
+    assignedModelStatus: worker.assignedModelStatus,
+    assignedModelSource: worker.assignedModelSource,
+    launch: worker.launch ? clone(worker.launch) : null,
+  };
+}
+
+async function prepareDispatch(args, state, modelSettings) {
+  assertKnownKeys(
+    args,
+    ['projectId', 'workerId', 'prompt', 'tool', 'target', 'effort', 'requestId'],
+    'dispatch_prepare',
+  );
+  const project = getProject(state, args.projectId, { forWrite: true });
+  const current = getWorker(project, args.workerId);
+  if (current.state === 'closed') {
+    fail('WORKER_CLOSED', '已关闭执行者请使用 worker_reopen', { workerId: current.id });
+  }
+  if (current.state === 'done') {
+    fail('WORKER_DONE', '已完成执行者请使用 worker_reopen', { workerId: current.id });
+  }
+  const tool = args.tool === undefined ? 'create_thread' : String(args.tool).trim();
+  if (!DISPATCH_TOOLS.includes(tool)) {
+    fail('INVALID_ARGUMENT', `tool 必须是：${DISPATCH_TOOLS.join('|')}`);
+  }
+  let prompt;
+  if (args.prompt === undefined) {
+    prompt = dispatchPrompt(project, current);
+  } else {
+    if (typeof args.prompt !== 'string' || !args.prompt.trim()) {
+      fail('DISPATCH_INCOMPLETE', '调用者提供了空 prompt，不能准备派发。', {
+        missing: ['prompt'],
+      });
+    }
+    prompt = requiredString(args.prompt, 'prompt', LIMITS.dispatchPrompt);
+  }
+  if (!prompt.trim()) {
+    fail('DISPATCH_INCOMPLETE', '派发 prompt 为空，不能准备。', { missing: ['prompt'] });
+  }
+  const target = normalizeDispatchTarget(tool, args.target);
+  const resolved = await resolveDispatchModel(current, modelSettings);
+  const effort = resolveDispatchEffort(tool, args.effort, resolved.row, resolved.entry);
+  const worker = clone(current);
+  worker.launch = {
+    id: makeId('dp'),
+    status: 'prepared',
+    tool,
+    prompt,
+    promptHash: crypto.createHash('sha256').update(prompt).digest('hex'),
+    promptChars: prompt.length,
+    model: resolved.model,
+    modelSource: resolved.source,
+    effort: effort.effort,
+    effortField: effort.effortField,
+    target,
+    requestId: args.requestId === undefined
+      ? null
+      : optionalString(args.requestId, 'requestId', LIMITS.requestId),
+    attempts: 0,
+    lastError: null,
+    sessionId: worker.sessionId,
+    requestedAt: null,
+    hostReport: null,
+    hostReportStatus: 'none',
+    modelMismatch: false,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+  touchWorker(worker);
+  project.workers = project.workers.map((item) => item.id === worker.id ? worker : item);
+  addEvent(project, 'dispatch_prepared', {
+    workerId: worker.id,
+    state: worker.state,
+    summary: `${worker.name} 的派发参数已准备`,
+    details: {
+      launchId: worker.launch.id,
+      tool,
+      model: resolved.model,
+      effort: effort.effort,
+    },
+  });
+  touchProject(project);
+  await persistProjectLocked(state, project);
+  return launchReceipt(project, worker);
+}
+
+async function recordDispatch(args, state) {
+  assertKnownKeys(
+    args,
+    [
+      'projectId',
+      'workerId',
+      'phase',
+      'launchId',
+      'sessionId',
+      'hostReportedModel',
+      'hostReportSource',
+      'errorCode',
+      'errorMessage',
+      'requestId',
+    ],
+    'dispatch_record',
+  );
+  const project = getProject(state, args.projectId, { forWrite: true });
+  const current = getWorker(project, args.workerId);
+  if (!current.launch) {
+    fail('DISPATCH_NOT_PREPARED', '请先调用 factory_task action=prepare 准备派发参数。', {
+      workerId: current.id,
+    });
+  }
+  if (args.launchId !== undefined && args.launchId !== current.launch.id) {
+    fail('LAUNCH_MISMATCH', '回执对应的派发参数已变化，请重新 prepare。', {
+      expected: current.launch.id,
+      received: args.launchId,
+    });
+  }
+  const phase = String(args.phase || '').trim();
+  const worker = clone(current);
+  const launch = clone(current.launch);
+  const sessionId = args.sessionId === undefined
+    ? null
+    : optionalString(args.sessionId, 'sessionId', LIMITS.sessionId);
+  const errorCode = args.errorCode === undefined
+    ? null
+    : optionalString(args.errorCode, 'errorCode', LIMITS.dispatchErrorCode);
+  const errorMessage = args.errorMessage === undefined
+    ? ''
+    : optionalString(args.errorMessage, 'errorMessage', LIMITS.dispatchErrorMessage);
+  if (phase === 'requested') {
+    launch.status = 'requested';
+    launch.requestedAt = nowIso();
+    if (args.requestId !== undefined) {
+      launch.requestId = optionalString(args.requestId, 'requestId', LIMITS.requestId);
+    }
+    if (sessionId) {
+      if (launch.sessionId && launch.sessionId !== sessionId) {
+        launch.hostReport = null;
+        launch.hostReportStatus = 'none';
+        launch.modelMismatch = false;
+      }
+      launch.sessionId = sessionId;
+      if (worker.sessionId && worker.sessionId !== sessionId) clearAssignedModel(worker);
+      worker.sessionId = sessionId;
+      worker.sessionStatus = 'recorded';
+      worker.sessionRecordedAt = nowIso();
+    }
+  } else if (phase === 'schema_error') {
+    launch.attempts += 1;
+    launch.lastError = { code: errorCode || 'SCHEMA_ERROR', message: errorMessage };
+    launch.status = 'prepared';
+  } else if (phase === 'host_report') {
+    if (typeof args.hostReportedModel !== 'string' || !args.hostReportedModel.trim()) {
+      fail('DISPATCH_INCOMPLETE', 'host_report 需要 hostReportedModel。', {
+        missing: ['hostReportedModel'],
+      });
+    }
+    const reportedModel = requiredString(
+      args.hostReportedModel,
+      'hostReportedModel',
+      LIMITS.model,
+    );
+    launch.hostReport = {
+      model: reportedModel,
+      source: args.hostReportSource === 'host_tool_result'
+        ? 'host_tool_result'
+        : 'caller_submission',
+      tool: launch.tool,
+      sessionId: sessionId || launch.sessionId,
+      status: 'unverified',
+      at: nowIso(),
+    };
+    launch.hostReportStatus = 'unverified';
+    launch.modelMismatch = reportedModel !== launch.model;
+    launch.status = 'host_reported';
+  } else if (phase === 'blocked' || phase === 'failed' || phase === 'cancelled') {
+    launch.status = phase;
+    launch.lastError = { code: errorCode || phase.toUpperCase(), message: errorMessage };
+  } else {
+    fail('INVALID_ARGUMENT', `phase 必须是 requested|schema_error|host_report|blocked|failed|cancelled`);
+  }
+  launch.updatedAt = nowIso();
+  worker.launch = launch;
+  touchWorker(worker);
+  project.workers = project.workers.map((item) => item.id === worker.id ? worker : item);
+  addEvent(project, `dispatch_${phase}`, {
+    workerId: worker.id,
+    state: worker.state,
+    summary: `${worker.name} 的派发回执：${phase}`,
+    details: {
+      launchId: launch.id,
+      model: launch.model,
+      hostReportedModel: launch.hostReport?.model ?? null,
+    },
+  });
+  touchProject(project);
+  await persistProjectLocked(state, project);
+  return launchReceipt(project, worker);
 }
 
 async function setWorkerState(args, state) {
@@ -1807,6 +2398,7 @@ async function retryWorker(args, state) {
   worker.state = 'ready';
   worker.completedAt = null;
   worker.refs = [];
+  worker.launch = null;
   worker.lastRetryAt = nowIso();
   const summary = optionalString(args.summary, 'summary', LIMITS.summary);
   if (summary !== undefined) worker.summary = summary;
@@ -1860,6 +2452,7 @@ async function reopenWorker(args, state) {
   worker.state = nextState;
   worker.completedAt = null;
   worker.refs = [];
+  worker.launch = null;
   const summary = optionalString(args.summary, 'summary', LIMITS.summary);
   if (summary !== undefined) worker.summary = summary;
   touchWorker(worker);
@@ -2091,6 +2684,9 @@ async function coordinatorControl(args, state) {
         sessionRecordedAt: null,
         model: 'auto',
         assignedModel: null,
+        assignedModelStatus: 'none',
+        assignedModelSource: null,
+        launch: null,
         sessionLive: false,
         depth: 1,
         readCursor: coordinator.cursor,
@@ -2286,6 +2882,10 @@ async function dispatch(action, args, dataDir, modelSettings) {
         return retryWorker(args, state);
       case 'worker_reopen':
         return reopenWorker(args, state);
+      case 'dispatch_prepare':
+        return prepareDispatch(args, state, modelSettings);
+      case 'dispatch_record':
+        return recordDispatch(args, state);
       case 'coordinator_control':
         return coordinatorControl(args, state);
       default:

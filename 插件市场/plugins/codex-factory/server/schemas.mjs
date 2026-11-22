@@ -20,6 +20,8 @@ export const ACTION_NAMES = Object.freeze([
   'worker_ack',
   'worker_retry',
   'worker_reopen',
+  'dispatch_prepare',
+  'dispatch_record',
   'coordinator_control',
 ]);
 
@@ -107,6 +109,11 @@ export const LIMITS = Object.freeze({
   logPath: 4_000,
   requestId: 300,
   cursor: 500,
+  dispatchPrompt: 100_000,
+  dispatchTool: 40,
+  dispatchEffort: 40,
+  dispatchErrorCode: 80,
+  dispatchErrorMessage: 2_000,
 });
 
 export function messageBodyFromEnvelope(envelope) {

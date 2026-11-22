@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { createStore } from './store.mjs';
 import { createModelSettings } from './model-settings.mjs';
 
-const version = '0.4.2';
+const version = '0.4.5';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const resourceUri = 'ui://codex-factory/panel-v1';
 const panelPath = path.join(here, 'panel.html');
@@ -126,6 +126,7 @@ function truncate(value, limit = 1200) {
 }
 
 function compactWorker(worker = {}) {
+  const launch = worker.launch || null;
   return {
     id: worker.id,
     name: worker.name,
@@ -140,6 +141,23 @@ function compactWorker(worker = {}) {
     sessionLive: false,
     model: worker.model || 'auto',
     assignedModel: worker.assignedModel || null,
+    assignedModelStatus: worker.assignedModelStatus || 'none',
+    assignedModelSource: worker.assignedModelSource || null,
+    launch: launch ? {
+      id: launch.id,
+      status: launch.status,
+      tool: launch.tool,
+      model: launch.model,
+      modelSource: launch.modelSource,
+      effort: launch.effort,
+      effortField: launch.effortField,
+      promptChars: launch.promptChars,
+      attempts: launch.attempts,
+      hostReportedModel: launch.hostReport?.model ?? null,
+      hostReportStatus: launch.hostReportStatus || 'none',
+      modelMismatch: launch.modelMismatch === true,
+      sessionId: launch.sessionId,
+    } : null,
     taskVersion: worker.taskVersion,
     acknowledgedTaskVersion: worker.acknowledgedTaskVersion,
     worktree: worker.worktree,
@@ -233,6 +251,7 @@ function compactProject(project = {}, include = []) {
 }
 
 function workerReceipt(data = {}) {
+  const launch = data.launch || null;
   return {
     id: data.workerId ?? data.id,
     projectId: data.projectId,
@@ -248,7 +267,25 @@ function workerReceipt(data = {}) {
     sessionBound: Boolean(data.sessionId),
     sessionLive: false,
     model: data.model,
+    taskModel: data.model,
     assignedModel: data.assignedModel,
+    assignedModelStatus: data.assignedModelStatus || 'none',
+    assignedModelSource: data.assignedModelSource || null,
+    launch: launch ? {
+      id: launch.id,
+      status: launch.status,
+      tool: launch.tool,
+      model: launch.model,
+      modelSource: launch.modelSource,
+      effort: launch.effort,
+      effortField: launch.effortField,
+      promptChars: launch.promptChars,
+      attempts: launch.attempts,
+      hostReportedModel: launch.hostReport?.model ?? null,
+      hostReportStatus: launch.hostReportStatus || 'none',
+      modelMismatch: launch.modelMismatch === true,
+      sessionId: launch.sessionId,
+    } : null,
     retryCount: data.retryCount,
     duplicate: data.duplicate,
   };
@@ -264,6 +301,39 @@ function messageReceipt(data = {}) {
     projectRevision: data.projectRevision,
     duplicate: data.duplicate === true,
     notification: data.notification,
+  };
+}
+
+function dispatchReceipt(data = {}, { includePrompt = false } = {}) {
+  const launch = data.launch || null;
+  if (!launch) return workerReceipt(data);
+  return {
+    projectId: data.projectId,
+    projectRevision: data.projectRevision,
+    workerId: data.workerId,
+    revision: data.revision,
+    taskVersion: data.taskVersion,
+    taskModel: data.model,
+    assignedModel: data.assignedModel ?? null,
+    assignedModelStatus: data.assignedModelStatus || 'none',
+    assignedModelSource: data.assignedModelSource || null,
+    launchId: launch.id,
+    launchStatus: launch.status,
+    tool: launch.tool,
+    promptChars: launch.promptChars,
+    promptHash: launch.promptHash,
+    ...(includePrompt ? { prompt: launch.prompt } : {}),
+    launchModel: launch.model,
+    modelSource: launch.modelSource,
+    effort: launch.effort,
+    effortField: launch.effortField,
+    target: launch.target,
+    attempts: launch.attempts,
+    hostReportedModel: launch.hostReport?.model ?? null,
+    hostReportStatus: launch.hostReportStatus || 'none',
+    modelMismatch: launch.modelMismatch === true,
+    sessionId: launch.sessionId,
+    error: launch.lastError,
   };
 }
 
@@ -362,6 +432,9 @@ function compactResult(action, data, mode = 'factory', include = []) {
       sessionLive: false,
       model: data.worker?.model || data.model || 'auto',
       assignedModel: data.worker?.assignedModel || data.assignedModel || null,
+      assignedModelStatus: data.worker?.assignedModelStatus || data.assignedModelStatus || 'none',
+      assignedModelSource: data.worker?.assignedModelSource || data.assignedModelSource || null,
+      launch: data.launch ?? data.worker?.launch ?? null,
       dependencies: data.dependencies,
       blockedBy: data.blockedBy,
       unread: data.unread,
@@ -650,9 +723,9 @@ server.registerTool(
   'factory_task',
   {
     title: '管理软件工厂任务',
-    description: '读取、保存、确认或更新执行者任务。首次用 view=full，后续用 view=status；写操作只回执。实际执行必须由宿主原生代理工具完成。',
+    description: '读取、保存、确认、更新执行者任务，并准备/记录宿主原生派发参数。prepare 生成可执行的 prompt/model/thinking/target 参数包；缺字段拒绝。实际创建对话仍由宿主原生工具完成。',
     inputSchema: {
-      action: z.enum(['save', 'get', 'state', 'ack', 'retry', 'reopen']),
+      action: z.enum(['save', 'get', 'state', 'ack', 'retry', 'reopen', 'prepare', 'record']),
       projectId: z.string().min(1).max(200),
       workerId: z.string().min(1).max(200).optional(),
       id: z.string().min(1).max(200).optional(),
@@ -667,6 +740,24 @@ server.registerTool(
       sessionId: z.string().max(500).optional(),
       model: z.string().max(200).optional(),
       assignedModel: z.string().max(200).optional(),
+      prompt: z.string().max(100000).optional(),
+      tool: z.enum(['create_thread', 'spawn_agent']).optional(),
+      target: z.record(z.string(), z.unknown()).optional(),
+      effort: z.string().max(40).optional(),
+      launchId: z.string().max(200).optional(),
+      hostReportedModel: z.string().max(200).optional(),
+      hostReportSource: z.enum(['host_tool_result', 'caller_submission']).optional(),
+      errorCode: z.string().max(80).optional(),
+      errorMessage: z.string().max(2000).optional(),
+      requestId: z.string().max(300).optional(),
+      phase: z.enum([
+        'requested',
+        'schema_error',
+        'host_report',
+        'blocked',
+        'failed',
+        'cancelled',
+      ]).optional(),
       worktree: z.string().max(2000).optional(),
       state: z.enum([
         'planned',
@@ -691,27 +782,74 @@ server.registerTool(
   handleModel(async (input) => {
     const { action, projectId, workerId } = input;
     if (action === 'save') {
-      for (const field of ['name', 'role', 'scope', 'task', 'acceptance']) {
-        if (!input[field]) throw new Error(`worker_save 缺少 ${field}`);
+      if (input.id !== undefined && input.workerId !== undefined && input.id !== input.workerId) {
+        throw new Error('id 与 workerId 指向不同执行者，请只保留一个值');
       }
-      const data = await store.call('worker_save', {
-        projectId,
-        id: input.id ?? input.workerId,
-        name: input.name,
-        role: input.role,
-        roleKind: input.roleKind,
-        scope: input.scope,
-        files: input.files ?? [],
-        task: input.task,
-        acceptance: input.acceptance,
-        dependencies: input.dependencies ?? [],
-        sessionId: input.sessionId,
-        model: input.model,
-        assignedModel: input.assignedModel,
-        worktree: input.worktree,
-        revision: input.revision,
-      });
+      const targetId = input.id ?? input.workerId;
+      let existing = null;
+      if (targetId) {
+        try {
+          existing = await store.call('worker_get', { projectId, workerId: targetId });
+        } catch (error) {
+          if (error?.code !== 'NOT_FOUND') throw error;
+        }
+      }
+      if (!existing) {
+        for (const field of ['name', 'role', 'scope', 'task', 'acceptance']) {
+          if (!input[field]) throw new Error(`新建执行者缺少 ${field}`);
+        }
+      }
+      const payload = { projectId };
+      for (const field of [
+        'name',
+        'role',
+        'roleKind',
+        'scope',
+        'files',
+        'task',
+        'acceptance',
+        'dependencies',
+        'sessionId',
+        'model',
+        'assignedModel',
+        'worktree',
+        'revision',
+      ]) {
+        if (input[field] !== undefined) payload[field] = input[field];
+      }
+      if (targetId) payload.id = targetId;
+      const data = await store.call('worker_save', payload);
       return operationReceipt('worker_save', data);
+    }
+    if (action === 'prepare') {
+      if (!workerId) throw new Error('prepare 缺少 workerId');
+      const data = await store.call('dispatch_prepare', {
+        projectId,
+        workerId,
+        prompt: input.prompt,
+        tool: input.tool,
+        target: input.target,
+        effort: input.effort,
+        requestId: input.requestId,
+      });
+      return dispatchReceipt(data, { includePrompt: true });
+    }
+    if (action === 'record') {
+      if (!workerId) throw new Error('record 缺少 workerId');
+      if (!input.phase) throw new Error('record 缺少 phase');
+      const data = await store.call('dispatch_record', {
+        projectId,
+        workerId,
+        phase: input.phase,
+        launchId: input.launchId,
+        sessionId: input.sessionId,
+        hostReportedModel: input.hostReportedModel,
+        hostReportSource: input.hostReportSource,
+        errorCode: input.errorCode,
+        errorMessage: input.errorMessage,
+        requestId: input.requestId,
+      });
+      return dispatchReceipt(data, { includePrompt: input.phase === 'schema_error' });
     }
     if (!workerId) throw new Error(`${action} 缺少 workerId`);
     if (action === 'get') {
@@ -871,6 +1009,8 @@ const storeActions = z.enum([
   'worker_ack',
   'worker_retry',
   'worker_reopen',
+  'dispatch_prepare',
+  'dispatch_record',
   'coordinator_control',
 ]);
 

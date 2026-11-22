@@ -165,7 +165,24 @@ async function main() {
       'utf8',
     );
 
-    store = await createStore({ dataDir });
+    let dispatchModelEnabled = true;
+    const modelSettings = {
+      read: async () => ({
+        settings: {
+          revision: 1,
+          modes: { factory: { enabled: true } },
+          models: [
+            { id: 'alpha', enabled: dispatchModelEnabled, effort: 'high', ability: 3 },
+            { id: 'beta', enabled: false, effort: 'low', ability: 3 },
+          ],
+        },
+        catalog: [
+          { id: 'alpha', available: true, efforts: ['low', 'high'], defaultEffort: 'high' },
+          { id: 'beta', available: true, efforts: ['low'], defaultEffort: 'low' },
+        ],
+      }),
+    };
+    store = await createStore({ dataDir, modelSettings });
     const project = await store.call('project_save', {
       name: '核心验证项目',
       root: projectRoot,
@@ -181,7 +198,7 @@ async function main() {
     check('项目主副本、数据目录镜像和索引均真实落盘');
 
     await store.close();
-    store = await createStore({ dataDir });
+    store = await createStore({ dataDir, modelSettings });
     const persisted = await store.call('project_get', { projectId: project.id });
     assert.equal(persisted.id, project.id);
     assert.equal((await store.call('overview')).projects.length, 1);
@@ -755,7 +772,7 @@ async function main() {
     store = undefined;
     await fs.unlink(path.join(projectRoot, '.codex-factory', 'project.json')).catch(() => {});
     await fs.unlink(path.join(projectRoot, '.codex-factory', 'project.json.bak')).catch(() => {});
-    store = await createStore({ dataDir });
+    store = await createStore({ dataDir, modelSettings });
     const recovered = await store.call('project_get', { projectId: project.id });
     assert.equal(recovered.workers.length, 7);
     assert.equal(recovered.evidence.length, 3);
@@ -944,6 +961,308 @@ async function main() {
     assert.equal(stopped.sessionLive, false);
     check('停止先请求宿主、确认后才进入 stopped');
 
+    const dispatchRoot = path.join(base, 'dispatch-project');
+    await fs.mkdir(dispatchRoot, { recursive: true });
+    const dispatchProject = await store.call('project_save', {
+      name: '派发参数验证项目',
+      root: dispatchRoot,
+      requirements: '只验证派发参数。',
+      rules: '执行者只有一层。',
+      maxRetries: 2,
+    });
+    const dispatchWorker = await store.call('worker_save', {
+      projectId: dispatchProject.id,
+      name: '派发验证工作对话',
+      role: '实现',
+      scope: '验证 prepare/record。',
+      files: ['src/**'],
+      task: '完成派发参数验证。',
+      acceptance: '缺字段拒绝、重试保参、模型归因待核实。',
+      dependencies: [],
+    });
+    const dispatchTarget = { type: 'projectless', directoryName: 'dispatch-project' };
+    await expectCode(() => store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      prompt: '',
+      target: dispatchTarget,
+    }), 'DISPATCH_INCOMPLETE');
+    await expectCode(() => store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+    }), 'DISPATCH_INCOMPLETE');
+    const prepared = await store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      target: dispatchTarget,
+    });
+    assert.equal(prepared.launch.model, 'alpha');
+    assert.equal(prepared.launch.modelSource, 'auto');
+    assert.equal(prepared.launch.effort, 'high');
+    assert.equal(prepared.launch.effortField, 'thinking');
+    assert.match(prepared.launch.prompt, /完成派发参数验证/);
+    assert.equal(prepared.launch.promptChars, prepared.launch.prompt.length);
+    const schemaRetry = await store.call('dispatch_record', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      phase: 'schema_error',
+      launchId: prepared.launch.id,
+      errorCode: 'SCHEMA',
+      errorMessage: '缺少字段',
+    });
+    assert.equal(schemaRetry.launch.id, prepared.launch.id);
+    assert.equal(schemaRetry.launch.model, 'alpha');
+    assert.equal(schemaRetry.launch.effort, 'high');
+    assert.equal(schemaRetry.launch.prompt, prepared.launch.prompt);
+    assert.equal(schemaRetry.launch.attempts, 1);
+    const reported = await store.call('dispatch_record', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      phase: 'host_report',
+      launchId: prepared.launch.id,
+      hostReportedModel: 'beta',
+      hostReportSource: 'host_tool_result',
+    });
+    assert.equal(reported.launch.hostReport.model, 'beta');
+    assert.equal(reported.launch.hostReportStatus, 'unverified');
+    assert.equal(reported.launch.modelMismatch, true);
+    assert.equal(reported.assignedModel, null);
+    assert.equal(reported.assignedModelStatus, 'none');
+    await expectCode(() => store.call('worker_save', {
+      projectId: dispatchProject.id,
+      id: dispatchWorker.workerId,
+      assignedModel: 'beta',
+      revision: reported.revision,
+    }), 'ASSIGNED_MODEL_READ_ONLY');
+    const sessionChanged = await store.call('worker_save', {
+      projectId: dispatchProject.id,
+      id: dispatchWorker.workerId,
+      sessionId: 'thread-dispatch-new',
+      revision: reported.revision,
+    });
+    assert.equal(sessionChanged.launch, null);
+    assert.equal(sessionChanged.assignedModel, null);
+    const preparedAgain = await store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      target: dispatchTarget,
+    });
+    const taskChanged = await store.call('worker_save', {
+      projectId: dispatchProject.id,
+      id: dispatchWorker.workerId,
+      task: '完成派发参数验证（新版本）。',
+      revision: preparedAgain.revision,
+    });
+    assert.equal(taskChanged.launch, null);
+    assert.equal(taskChanged.taskVersion, 2);
+    const betaWorker = await store.call('worker_save', {
+      projectId: dispatchProject.id,
+      name: '禁用模型工作对话',
+      role: '实现',
+      scope: '验证禁用模型不默认回退。',
+      files: ['beta/**'],
+      task: '验证禁用模型。',
+      acceptance: 'prepare 拒绝。',
+      dependencies: [],
+      model: 'beta',
+    });
+    await expectCode(() => store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: betaWorker.workerId,
+      target: dispatchTarget,
+    }), 'MODEL_NOT_ALLOWED');
+    dispatchModelEnabled = false;
+    await expectCode(() => store.call('dispatch_prepare', {
+      projectId: dispatchProject.id,
+      workerId: dispatchWorker.workerId,
+      target: dispatchTarget,
+    }), 'DISPATCH_INCOMPLETE');
+    dispatchModelEnabled = true;
+    check('prepare 缺 prompt/model 拒绝、auto 解析、schema 重试保参、宿主报告待核实、换 session 失效');
+
+    const globRoot = path.join(base, 'glob-project');
+    await fs.mkdir(globRoot, { recursive: true });
+    const globProject = await store.call('project_save', {
+      name: '文件归属前缀验证',
+      root: globRoot,
+      requirements: '验证 glob 重叠。',
+      rules: '真正重叠才拒绝。',
+      maxRetries: 1,
+    });
+    const frontend = await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '前端',
+      role: 'frontend',
+      scope: 'logs/frontend*',
+      files: ['logs/frontend*'],
+      task: '实现前端日志。',
+      acceptance: '可创建。',
+      dependencies: [],
+    });
+    const backend = await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '后端',
+      role: 'backend',
+      scope: 'logs/backend*',
+      files: ['logs/backend*'],
+      task: '实现后端日志。',
+      acceptance: '不同前缀不冲突。',
+      dependencies: [],
+    });
+    assert.ok(frontend.workerId);
+    assert.ok(backend.workerId);
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      name: '前端日志',
+      role: 'frontend',
+      scope: '真正重叠',
+      files: ['logs/frontend.js'],
+      task: '制造真实重叠。',
+      acceptance: '应拒绝。',
+      dependencies: [],
+    }), 'FILE_CONFLICT');
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      name: '全部日志',
+      role: 'ops',
+      scope: '目录级重叠',
+      files: ['logs/**'],
+      task: '制造目录重叠。',
+      acceptance: '应拒绝。',
+      dependencies: [],
+    }), 'FILE_CONFLICT');
+    check('不同 glob 前缀不误判冲突，真正重叠仍拒绝');
+
+    await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '前缀通配 A',
+      role: 'a',
+      scope: 'a*',
+      files: ['a*'],
+      task: '验证通配交集。',
+      acceptance: '与 *b 必须冲突。',
+      dependencies: [],
+    });
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      name: '前缀通配 B',
+      role: 'b',
+      scope: '*b',
+      files: ['*b'],
+      task: '验证通配交集。',
+      acceptance: 'a* 与 *b 在 ab 上重叠。',
+      dependencies: [],
+    }), 'FILE_CONFLICT');
+    await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '目录归属',
+      role: 'dir',
+      scope: 'src',
+      files: ['src'],
+      task: '验证目录归属。',
+      acceptance: 'src/file 必须冲突。',
+      dependencies: [],
+    });
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      name: '目录子文件',
+      role: 'dir',
+      scope: 'src/file',
+      files: ['src/file'],
+      task: '验证目录子文件。',
+      acceptance: '必须与 src 冲突。',
+      dependencies: [],
+    }), 'FILE_CONFLICT');
+    await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '通配目录',
+      role: 'tree',
+      scope: 'tree/**',
+      files: ['tree/**'],
+      task: '验证通配目录。',
+      acceptance: 'tree/leaf.js 必须冲突。',
+      dependencies: [],
+    });
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      name: '通配目录子文件',
+      role: 'tree',
+      scope: 'tree/leaf.js',
+      files: ['tree/leaf.js'],
+      task: '验证通配目录子文件。',
+      acceptance: '必须与 tree/** 冲突。',
+      dependencies: [],
+    }), 'FILE_CONFLICT');
+    await store.call('worker_save', {
+      projectId: globProject.id,
+      name: '不同普通目录',
+      role: 'other',
+      scope: 'src2/file',
+      files: ['src2/file'],
+      task: '验证普通路径不误判。',
+      acceptance: 'src 与 src2/file 不冲突。',
+      dependencies: [],
+    });
+    check('a* 与 *b 保守冲突、plain 目录与子文件冲突、tree/** 与子文件冲突、不同普通目录放行');
+
+    const missingRoot = path.join(base, 'missing-root');
+    const missingRootError = await expectCode(() => store.call('project_save', {
+      name: '缺失根目录',
+      root: missingRoot,
+      requirements: '默认不创建。',
+      rules: '必须显式初始化。',
+      maxRetries: 1,
+    }), 'INVALID_ARGUMENT');
+    assert.equal(missingRootError.details?.canCreate, true);
+    assert.match(missingRootError.message, /createRoot=true/);
+    assert.equal(await exists(missingRoot), false);
+    await expectCode(() => store.call('project_save', {
+      name: '缺失父目录',
+      root: path.join(base, 'no-parent', 'nested-root'),
+      requirements: '不递归创建。',
+      rules: '父目录缺失应拒绝。',
+      maxRetries: 1,
+      createRoot: true,
+    }), 'INVALID_ARGUMENT');
+    assert.equal(await exists(path.join(base, 'no-parent')), false);
+    const createdRoot = path.join(base, 'explicit-root');
+    const createdProject = await store.call('project_save', {
+      name: '显式根目录',
+      root: createdRoot,
+      requirements: '仅创建最后一级。',
+      rules: 'createRoot=true 可用。',
+      maxRetries: 1,
+      createRoot: true,
+    });
+    assert.ok(createdProject.id);
+    assert.equal(await exists(createdRoot), true);
+    check('项目根缺失默认拒绝并可操作提示，显式 createRoot 仅创建最后一级');
+
+    const partial = await store.call('worker_save', {
+      projectId: globProject.id,
+      workerId: frontend.workerId,
+      sessionId: 'thread-partial-update',
+      model: 'auto',
+      revision: frontend.revision,
+    });
+    assert.equal(partial.sessionId, 'thread-partial-update');
+    const partialRecord = await store.call('worker_get', {
+      projectId: globProject.id,
+      workerId: frontend.workerId,
+    });
+    const partialWorker = partialRecord.worker;
+    assert.equal(partialWorker.name, '前端');
+    assert.equal(partialWorker.role, 'frontend');
+    assert.equal(partialWorker.task, '实现前端日志。');
+    assert.deepEqual(partialWorker.files, ['logs/frontend*']);
+    await expectCode(() => store.call('worker_save', {
+      projectId: globProject.id,
+      id: frontend.workerId,
+      workerId: backend.workerId,
+      revision: partial.revision,
+    }), 'INVALID_ARGUMENT');
+    check('worker_save 支持 workerId 别名、部分更新不清空字段、冲突别名拒绝');
+
     const staleLock = path.join(dataDir, '.store.lock');
     await fs.mkdir(staleLock, { recursive: true });
     await fs.writeFile(path.join(staleLock, 'owner.json'), JSON.stringify({
@@ -973,12 +1292,37 @@ async function main() {
     check('项目关闭幂等、禁止后续写入且不删除成果');
 
     await store.close();
-    store = await createStore({ dataDir });
+    const dispatchPrimary = path.join(dispatchRoot, '.codex-factory', 'project.json');
+    const legacyProjectFile = JSON.parse(await fs.readFile(dispatchPrimary, 'utf8'));
+    const legacyWorkerFile = legacyProjectFile.workers.find(
+      (worker) => worker.id === dispatchWorker.workerId,
+    );
+    legacyWorkerFile.assignedModel = 'legacy-model';
+    delete legacyWorkerFile.assignedModelStatus;
+    delete legacyWorkerFile.assignedModelSource;
+    await fs.writeFile(dispatchPrimary, `${JSON.stringify(legacyProjectFile, null, 2)}\n`, 'utf8');
+    store = await createStore({ dataDir, modelSettings });
     const afterRestart = await store.call('project_get', { projectId: project.id });
     assert.equal(afterRestart.status, 'closed');
     assert.equal(afterRestart.workers.length, 7);
+    const legacyProject = await store.call('project_get', { projectId: dispatchProject.id });
+    const legacyWorker = legacyProject.workers.find(
+      (worker) => worker.id === dispatchWorker.workerId,
+    );
+    assert.equal(legacyWorker.assignedModel, 'legacy-model');
+    assert.equal(legacyWorker.assignedModelStatus, 'legacy_unverified');
+    assert.equal(legacyWorker.assignedModelSource, 'legacy');
+    const legacyCleared = await store.call('worker_save', {
+      projectId: dispatchProject.id,
+      id: legacyWorker.id,
+      sessionId: 'thread-legacy-new',
+      revision: legacyWorker.revision,
+    });
+    assert.equal(legacyCleared.assignedModel, null);
+    assert.equal(legacyCleared.assignedModelStatus, 'none');
     await store.close();
     store = undefined;
+    check('旧 assignedModel 归一化为历史未核实，换 session 后清空');
     check('关闭项目在 store 重启后仍保留完整记录');
 
     const report = {

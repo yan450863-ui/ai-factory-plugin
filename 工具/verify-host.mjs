@@ -97,7 +97,7 @@ try {
     clientInfo: {
       name: 'codex_factory_host_verifier',
       title: 'Codex Factory Host Verifier',
-      version: '0.4.2',
+      version: '0.4.5',
     },
     capabilities: { experimentalApi: true },
   });

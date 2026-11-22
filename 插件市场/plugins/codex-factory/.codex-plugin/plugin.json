@@ -1,6 +1,6 @@
 {
   "name": "codex-factory",
-  "version": "0.4.2",
+  "version": "0.4.5",
   "description": "在同一插件中提供软件工厂与团队双模式、可选长任务协调、统一模型和原生任务管理。",
   "author": {
     "name": "本地工作区"
