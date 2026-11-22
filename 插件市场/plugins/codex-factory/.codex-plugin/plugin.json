@@ -1,0 +1,25 @@
+{
+  "name": "codex-factory",
+  "version": "0.4.2",
+  "description": "在同一插件中提供软件工厂与团队双模式、可选长任务协调、统一模型和原生任务管理。",
+  "author": {
+    "name": "本地工作区"
+  },
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "AI工厂插件",
+    "shortDescription": "软件工厂、团队与长任务协调",
+    "longDescription": "软件工厂负责项目分工与验收，团队由主对话直接制作并按需使用一层助手；两者共享模型目录、独立保存派发设置。长任务协调按需开启，只在真实宿主会话内监控。",
+    "developerName": "本地工作区",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "根据当前软件工厂或团队模式完成这个任务。",
+    "logo": "./assets/icon.svg",
+    "composerIcon": "./assets/icon.svg"
+  },
+  "mcpServers": "./mcp.json"
+}

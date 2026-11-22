@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "codex_factory": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/dist/mcp.mjs"
+      ],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "CODEX_FACTORY_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+      }
+    }
+  }
+}

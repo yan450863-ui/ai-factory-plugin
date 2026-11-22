@@ -1,0 +1,19 @@
+{
+  "name": "codex-factory-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node verify-mcp.mjs && node verify-store.mjs && node verify-models.mjs && node verify-ui.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "smol-toml": "1.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0",
+    "happy-dom": "^21.0.4"
+  }
+}

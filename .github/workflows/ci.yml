@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: 工具
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: 工具/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Run portable checks
+        run: npm run verify
+
+      - name: Check portable MCP configuration
+        shell: pwsh
+        run: |
+          $mcp = Get-Content -Raw -LiteralPath '..\插件市场\plugins\codex-factory\mcp.json' | ConvertFrom-Json
+          $server = $mcp.mcpServers.codex_factory
+          if ($server.command -ne 'node') { throw 'MCP command must be node' }
+          if ($server.args -notcontains '${PLUGIN_ROOT}/dist/mcp.mjs') { throw 'MCP args must use PLUGIN_ROOT' }
+          if ($null -ne $server.env.PATH) { throw 'MCP config must not embed a machine-specific PATH' }

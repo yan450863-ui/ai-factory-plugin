@@ -1,0 +1,26 @@
+# Dependencies and build caches
+工具/node_modules/
+工具/.npm/
+工具/.cache/
+
+# Local verification output and runtime data
+验证/
+.codex-factory/
+*.log
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Release artifacts kept outside the source tree
+*.zip
+*.sha256

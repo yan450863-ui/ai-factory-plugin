@@ -1,0 +1,8 @@
+interface:
+  display_name: 软件工厂
+  short_description: 使用 Codex 原生代理规划和交付软件项目
+  default_prompt: 使用 $auto-factory 规划、分派、验证并交付这个软件需求。
+policy:
+  allow_implicit_invocation: true
+  products:
+    - CODEX
